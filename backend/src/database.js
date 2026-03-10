@@ -1,358 +1,362 @@
-const fs = require('fs');
-const path = require('path');
+const mongoose = require('mongoose');
+const dns = require('dns');
+dns.setDefaultResultOrder('ipv4first');
+dns.setServers(['8.8.8.8', '8.8.4.4']);
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
-const USERS_FILE = path.join(DATA_DIR, 'users.json');
-const ANIME_FILE = path.join(DATA_DIR, 'anime.json');
-const LISTS_FILE = path.join(DATA_DIR, 'lists.json');
-const REVIEWS_FILE = path.join(DATA_DIR, 'reviews.json');
-const ACTIVITY_FILE = path.join(DATA_DIR, 'activity.json');
-const FOLLOWS_FILE = path.join(DATA_DIR, 'follows.json');
+mongoose.connect(process.env.MONGODB_URI, { family: 4 })
+  .then(() => console.log('MongoDB connected'))
+  .catch(err => { console.error('MongoDB connection error:', err); process.exit(1); });
 
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-
-function readFile(filePath) {
-  if (!fs.existsSync(filePath)) return [];
-  try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  } catch {
-    return [];
+// Convert Mongoose document or lean object to plain object with string id
+function toObj(doc) {
+  if (!doc) return null;
+  if (Array.isArray(doc)) return doc.map(toObj);
+  const obj = typeof doc.toObject === 'function' ? doc.toObject({ versionKey: false }) : { ...doc };
+  if (obj._id !== undefined) {
+    obj.id = obj._id.toString();
+    delete obj._id;
   }
+  delete obj.__v;
+  // Convert ObjectId reference fields to strings
+  if (obj.user_id && typeof obj.user_id !== 'string') obj.user_id = obj.user_id.toString();
+  if (obj.follower_id && typeof obj.follower_id !== 'string') obj.follower_id = obj.follower_id.toString();
+  if (obj.following_id && typeof obj.following_id !== 'string') obj.following_id = obj.following_id.toString();
+  return obj;
 }
 
-function writeFile(filePath, data) {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
-}
+// ── Schemas ──────────────────────────────────────────────────────────────────
 
-let _nextUserId = null;
-let _nextAnimeId = null;
+const UserSchema = new mongoose.Schema({
+  google_id: { type: String, required: true, unique: true },
+  email: { type: String, required: true },
+  name: { type: String, required: true },
+  avatar: String,
+  bio: String,
+  cover_type: String,
+  cover_value: String,
+  pinned_mal_ids: [Number],
+  username: { type: String, unique: true, sparse: true },
+  created_at: { type: Date, default: Date.now },
+});
 
-function getNextId(data) {
-  if (data.length === 0) return 1;
-  return Math.max(...data.map(d => d.id)) + 1;
-}
+const AnimeSchema = new mongoose.Schema({
+  user_id: { type: mongoose.Schema.Types.ObjectId, required: true },
+  mal_id: { type: Number, required: true },
+  title: { type: String, required: true },
+  image_url: String,
+  status: { type: String, required: true },
+  score: Number,
+  added_at: { type: Date, default: Date.now },
+});
+AnimeSchema.index({ user_id: 1, mal_id: 1 }, { unique: true });
+
+const ListSchema = new mongoose.Schema({
+  user_id: { type: mongoose.Schema.Types.ObjectId, required: true },
+  name: { type: String, required: true, maxlength: 100 },
+  description: { type: String, default: '', maxlength: 300 },
+  is_public: { type: Boolean, default: true },
+  anime: [{ mal_id: Number, title: String, image_url: String, _id: false }],
+  created_at: { type: Date, default: Date.now },
+});
+
+const ReviewSchema = new mongoose.Schema({
+  user_id: { type: mongoose.Schema.Types.ObjectId, required: true },
+  mal_id: { type: Number, required: true },
+  anime_title: String,
+  anime_image: String,
+  text: { type: String, default: '', maxlength: 1000 },
+  score: Number,
+  is_public: { type: Boolean, default: true },
+  created_at: { type: Date, default: Date.now },
+  updated_at: Date,
+});
+ReviewSchema.index({ user_id: 1, mal_id: 1 }, { unique: true });
+
+const ActivitySchema = new mongoose.Schema({
+  user_id: { type: mongoose.Schema.Types.ObjectId, required: true },
+  type: String,
+  data: mongoose.Schema.Types.Mixed,
+  created_at: { type: Date, default: Date.now },
+});
+ActivitySchema.index({ user_id: 1 });
+
+const FollowSchema = new mongoose.Schema({
+  follower_id: { type: mongoose.Schema.Types.ObjectId, required: true },
+  following_id: { type: mongoose.Schema.Types.ObjectId, required: true },
+  created_at: { type: Date, default: Date.now },
+});
+FollowSchema.index({ follower_id: 1, following_id: 1 }, { unique: true });
+
+const User = mongoose.model('User', UserSchema);
+const Anime = mongoose.model('Anime', AnimeSchema);
+const List = mongoose.model('List', ListSchema);
+const Review = mongoose.model('Review', ReviewSchema);
+const Activity = mongoose.model('Activity', ActivitySchema);
+const Follow = mongoose.model('Follow', FollowSchema);
 
 // ── Users ──────────────────────────────────────────────────────────────────
 
-function findUserByGoogleId(googleId) {
-  return readFile(USERS_FILE).find(u => u.google_id === googleId) || null;
+async function findUserByGoogleId(googleId) {
+  return toObj(await User.findOne({ google_id: googleId }).lean());
 }
 
-function findUserById(id) {
-  return readFile(USERS_FILE).find(u => u.id === parseInt(id)) || null;
+async function findUserById(id) {
+  try {
+    return toObj(await User.findById(id).lean());
+  } catch {
+    return null;
+  }
 }
 
-function findUserByUsername(username) {
-  const lower = username.toLowerCase();
-  return readFile(USERS_FILE).find(u => u.username && u.username.toLowerCase() === lower) || null;
+async function findUserByUsername(username) {
+  return toObj(await User.findOne({ username: username.toLowerCase() }).lean());
 }
 
-function createUser({ google_id, email, name, avatar }) {
-  const users = readFile(USERS_FILE);
-  const user = {
-    id: getNextId(users),
-    google_id,
-    email,
-    name,
-    avatar: avatar || null,
-    created_at: new Date().toISOString(),
-  };
-  users.push(user);
-  writeFile(USERS_FILE, users);
-  return user;
+async function createUser({ google_id, email, name, avatar }) {
+  const user = await User.create({ google_id, email, name, avatar: avatar || null });
+  return toObj(user.toObject());
 }
 
-function updateUser(googleId, { name, avatar }) {
-  const users = readFile(USERS_FILE);
-  const idx = users.findIndex(u => u.google_id === googleId);
-  if (idx === -1) return null;
-  users[idx] = { ...users[idx], name, avatar: avatar || users[idx].avatar };
-  writeFile(USERS_FILE, users);
-  return users[idx];
+async function updateUser(googleId, { name, avatar }) {
+  const update = { name };
+  if (avatar) update.avatar = avatar;
+  const user = await User.findOneAndUpdate({ google_id: googleId }, { $set: update }, { new: true }).lean();
+  return toObj(user);
+}
+
+async function updateProfile(userId, updates) {
+  const setData = {};
+  const allowed = ['bio', 'cover_type', 'cover_value', 'pinned_mal_ids', 'username'];
+  for (const key of allowed) {
+    if (updates[key] !== undefined) setData[key] = updates[key];
+  }
+  const user = await User.findByIdAndUpdate(userId, { $set: setData }, { new: true }).lean();
+  return toObj(user);
 }
 
 // ── Anime list ─────────────────────────────────────────────────────────────
 
-function getUserAnimeList(userId) {
-  return readFile(ANIME_FILE)
-    .filter(a => a.user_id === parseInt(userId))
-    .sort((a, b) => new Date(b.added_at) - new Date(a.added_at));
+async function getUserAnimeList(userId) {
+  const list = await Anime.find({ user_id: userId }).sort({ added_at: -1 }).lean();
+  return toObj(list);
 }
 
-function getAnimeEntry(userId, malId) {
-  return readFile(ANIME_FILE)
-    .find(a => a.user_id === parseInt(userId) && a.mal_id === parseInt(malId)) || null;
+async function getAnimeEntry(userId, malId) {
+  return toObj(await Anime.findOne({ user_id: userId, mal_id: parseInt(malId) }).lean());
 }
 
-function upsertAnime(userId, { mal_id, title, image_url, status, score }) {
-  const list = readFile(ANIME_FILE);
-  const idx = list.findIndex(a => a.user_id === parseInt(userId) && a.mal_id === parseInt(mal_id));
+async function upsertAnime(userId, { mal_id, title, image_url, status, score }) {
+  const malId = parseInt(mal_id);
+  const setData = { title, status };
+  if (image_url) setData.image_url = image_url;
+  if (score !== undefined) setData.score = score;
 
-  if (idx !== -1) {
-    list[idx] = {
-      ...list[idx],
-      title,
-      image_url: image_url || list[idx].image_url,
-      status,
-      score: score !== undefined ? score : list[idx].score,
-    };
-    writeFile(ANIME_FILE, list);
-    return list[idx];
-  }
-
-  const entry = {
-    id: getNextId(list),
-    user_id: parseInt(userId),
-    mal_id: parseInt(mal_id),
-    title,
-    image_url: image_url || null,
-    status,
-    score: score || null,
-    added_at: new Date().toISOString(),
-  };
-  list.push(entry);
-  writeFile(ANIME_FILE, list);
-  return entry;
+  const entry = await Anime.findOneAndUpdate(
+    { user_id: userId, mal_id: malId },
+    { $set: setData, $setOnInsert: { added_at: new Date() } },
+    { upsert: true, new: true }
+  ).lean();
+  return toObj(entry);
 }
 
-function updateAnimeStatus(userId, malId, status) {
-  const list = readFile(ANIME_FILE);
-  const idx = list.findIndex(a => a.user_id === parseInt(userId) && a.mal_id === parseInt(malId));
-  if (idx === -1) return null;
-  list[idx].status = status;
-  writeFile(ANIME_FILE, list);
-  return list[idx];
+async function updateAnimeStatus(userId, malId, status) {
+  const entry = await Anime.findOneAndUpdate(
+    { user_id: userId, mal_id: parseInt(malId) },
+    { $set: { status } },
+    { new: true }
+  ).lean();
+  return toObj(entry);
 }
 
-function updateAnimeEntry(userId, malId, updates) {
-  const list = readFile(ANIME_FILE);
-  const idx = list.findIndex(a => a.user_id === parseInt(userId) && a.mal_id === parseInt(malId));
-  if (idx === -1) return null;
-  if (updates.status !== undefined) list[idx].status = updates.status;
-  if (updates.score !== undefined) list[idx].score = updates.score;
-  writeFile(ANIME_FILE, list);
-  return list[idx];
+async function updateAnimeEntry(userId, malId, updates) {
+  const entry = await Anime.findOneAndUpdate(
+    { user_id: userId, mal_id: parseInt(malId) },
+    { $set: updates },
+    { new: true }
+  ).lean();
+  return toObj(entry);
 }
 
-function removeAnime(userId, malId) {
-  const list = readFile(ANIME_FILE);
-  const before = list.length;
-  const filtered = list.filter(a => !(a.user_id === parseInt(userId) && a.mal_id === parseInt(malId)));
-  if (filtered.length === before) return false;
-  writeFile(ANIME_FILE, filtered);
-  return true;
-}
-
-function updateProfile(userId, updates) {
-  const users = readFile(USERS_FILE);
-  const idx = users.findIndex(u => u.id === parseInt(userId));
-  if (idx === -1) return null;
-  const allowed = ['bio', 'cover_type', 'cover_value', 'pinned_mal_ids', 'username'];
-  for (const key of allowed) {
-    if (updates[key] !== undefined) users[idx][key] = updates[key];
-  }
-  writeFile(USERS_FILE, users);
-  return users[idx];
+async function removeAnime(userId, malId) {
+  const result = await Anime.deleteOne({ user_id: userId, mal_id: parseInt(malId) });
+  return result.deletedCount > 0;
 }
 
 // ── Custom Lists ────────────────────────────────────────────────────────────
 
-function getUserLists(userId) {
-  return readFile(LISTS_FILE).filter(l => l.user_id === parseInt(userId));
+async function getUserLists(userId) {
+  return toObj(await List.find({ user_id: userId }).lean());
 }
 
-function getListById(id) {
-  return readFile(LISTS_FILE).find(l => l.id === parseInt(id)) || null;
+async function getListById(id) {
+  try {
+    return toObj(await List.findById(id).lean());
+  } catch {
+    return null;
+  }
 }
 
-function createList(userId, { name, description, is_public }) {
-  const lists = readFile(LISTS_FILE);
-  const list = {
-    id: getNextId(lists),
-    user_id: parseInt(userId),
+async function createList(userId, { name, description, is_public }) {
+  const list = await List.create({
+    user_id: userId,
     name: name.slice(0, 100),
     description: (description || '').slice(0, 300),
     is_public: Boolean(is_public),
     anime: [],
-    created_at: new Date().toISOString(),
-  };
-  lists.push(list);
-  writeFile(LISTS_FILE, lists);
-  return list;
+  });
+  return toObj(list.toObject());
 }
 
-function updateList(id, userId, updates) {
-  const lists = readFile(LISTS_FILE);
-  const idx = lists.findIndex(l => l.id === parseInt(id) && l.user_id === parseInt(userId));
-  if (idx === -1) return null;
-  if (updates.name !== undefined) lists[idx].name = updates.name.slice(0, 100);
-  if (updates.description !== undefined) lists[idx].description = updates.description.slice(0, 300);
-  if (updates.is_public !== undefined) lists[idx].is_public = Boolean(updates.is_public);
-  writeFile(LISTS_FILE, lists);
-  return lists[idx];
-}
-
-function deleteList(id, userId) {
-  const lists = readFile(LISTS_FILE);
-  const idx = lists.findIndex(l => l.id === parseInt(id) && l.user_id === parseInt(userId));
-  if (idx === -1) return false;
-  lists.splice(idx, 1);
-  writeFile(LISTS_FILE, lists);
-  return true;
-}
-
-function addAnimeToList(listId, userId, { mal_id, title, image_url }) {
-  const lists = readFile(LISTS_FILE);
-  const idx = lists.findIndex(l => l.id === parseInt(listId) && l.user_id === parseInt(userId));
-  if (idx === -1) return null;
-  if (!lists[idx].anime.find(a => a.mal_id === parseInt(mal_id))) {
-    lists[idx].anime.push({ mal_id: parseInt(mal_id), title, image_url: image_url || null });
-    writeFile(LISTS_FILE, lists);
+async function updateList(id, userId, updates) {
+  const setData = {};
+  if (updates.name !== undefined) setData.name = updates.name.slice(0, 100);
+  if (updates.description !== undefined) setData.description = updates.description.slice(0, 300);
+  if (updates.is_public !== undefined) setData.is_public = Boolean(updates.is_public);
+  try {
+    const list = await List.findOneAndUpdate({ _id: id, user_id: userId }, { $set: setData }, { new: true }).lean();
+    return toObj(list);
+  } catch {
+    return null;
   }
-  return lists[idx];
 }
 
-function removeAnimeFromList(listId, userId, mal_id) {
-  const lists = readFile(LISTS_FILE);
-  const idx = lists.findIndex(l => l.id === parseInt(listId) && l.user_id === parseInt(userId));
-  if (idx === -1) return null;
-  lists[idx].anime = lists[idx].anime.filter(a => a.mal_id !== parseInt(mal_id));
-  writeFile(LISTS_FILE, lists);
-  return lists[idx];
+async function deleteList(id, userId) {
+  try {
+    const result = await List.deleteOne({ _id: id, user_id: userId });
+    return result.deletedCount > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function addAnimeToList(listId, userId, { mal_id, title, image_url }) {
+  const malId = parseInt(mal_id);
+  try {
+    const list = await List.findOne({ _id: listId, user_id: userId });
+    if (!list) return null;
+    if (!list.anime.find(a => a.mal_id === malId)) {
+      list.anime.push({ mal_id: malId, title, image_url: image_url || null });
+      await list.save();
+    }
+    return toObj(list.toObject());
+  } catch {
+    return null;
+  }
+}
+
+async function removeAnimeFromList(listId, userId, mal_id) {
+  const malId = parseInt(mal_id);
+  try {
+    const list = await List.findOneAndUpdate(
+      { _id: listId, user_id: userId },
+      { $pull: { anime: { mal_id: malId } } },
+      { new: true }
+    ).lean();
+    return toObj(list);
+  } catch {
+    return null;
+  }
 }
 
 // ── Reviews ─────────────────────────────────────────────────────────────────
 
-function getUserReview(userId, malId) {
-  return readFile(REVIEWS_FILE)
-    .find(r => r.user_id === parseInt(userId) && r.mal_id === parseInt(malId)) || null;
+async function getUserReview(userId, malId) {
+  return toObj(await Review.findOne({ user_id: userId, mal_id: parseInt(malId) }).lean());
 }
 
-function getUserReviews(userId) {
-  return readFile(REVIEWS_FILE)
-    .filter(r => r.user_id === parseInt(userId))
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+async function getUserReviews(userId) {
+  return toObj(await Review.find({ user_id: userId }).sort({ created_at: -1 }).lean());
 }
 
-function getAnimeReviews(malId) {
-  return readFile(REVIEWS_FILE)
-    .filter(r => r.mal_id === parseInt(malId) && r.is_public)
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+async function getAnimeReviews(malId) {
+  return toObj(await Review.find({ mal_id: parseInt(malId), is_public: true }).sort({ created_at: -1 }).lean());
 }
 
-function createOrUpdateReview(userId, { mal_id, anime_title, anime_image, text, score, is_public }) {
-  const reviews = readFile(REVIEWS_FILE);
-  const idx = reviews.findIndex(r => r.user_id === parseInt(userId) && r.mal_id === parseInt(mal_id));
-  if (idx !== -1) {
-    reviews[idx] = { ...reviews[idx], anime_title, anime_image, text, score, is_public, updated_at: new Date().toISOString() };
-    writeFile(REVIEWS_FILE, reviews);
-    return reviews[idx];
-  }
-  const review = {
-    id: getNextId(reviews),
-    user_id: parseInt(userId),
-    mal_id: parseInt(mal_id),
-    anime_title,
-    anime_image: anime_image || null,
-    text: (text || '').slice(0, 1000),
-    score,
-    is_public: Boolean(is_public),
-    created_at: new Date().toISOString(),
-  };
-  reviews.push(review);
-  writeFile(REVIEWS_FILE, reviews);
-  return review;
+async function createOrUpdateReview(userId, { mal_id, anime_title, anime_image, text, score, is_public }) {
+  const review = await Review.findOneAndUpdate(
+    { user_id: userId, mal_id: parseInt(mal_id) },
+    {
+      $set: { anime_title, anime_image, text, score, is_public, updated_at: new Date() },
+      $setOnInsert: { created_at: new Date() },
+    },
+    { upsert: true, new: true }
+  ).lean();
+  return toObj(review);
 }
 
-function deleteReview(userId, malId) {
-  const reviews = readFile(REVIEWS_FILE);
-  const before = reviews.length;
-  const filtered = reviews.filter(r => !(r.user_id === parseInt(userId) && r.mal_id === parseInt(malId)));
-  if (filtered.length === before) return false;
-  writeFile(REVIEWS_FILE, filtered);
-  return true;
+async function deleteReview(userId, malId) {
+  const result = await Review.deleteOne({ user_id: userId, mal_id: parseInt(malId) });
+  return result.deletedCount > 0;
 }
 
 // ── Activity ─────────────────────────────────────────────────────────────────
 
-function logActivity(userId, type, data) {
-  const activity = readFile(ACTIVITY_FILE);
-  const entry = {
-    id: getNextId(activity),
-    user_id: parseInt(userId),
-    type,
-    data,
-    created_at: new Date().toISOString(),
-  };
-  activity.push(entry);
-  // keep only last 500 entries total to avoid unbounded growth
-  if (activity.length > 500) activity.splice(0, activity.length - 500);
-  writeFile(ACTIVITY_FILE, activity);
-  return entry;
+async function logActivity(userId, type, data) {
+  const entry = await Activity.create({ user_id: userId, type, data });
+  return toObj(entry.toObject());
 }
 
-function getUserActivity(userId, limit = 30) {
-  return readFile(ACTIVITY_FILE)
-    .filter(a => a.user_id === parseInt(userId))
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-    .slice(0, limit);
+async function getUserActivity(userId, limit = 30) {
+  return toObj(await Activity.find({ user_id: userId }).sort({ created_at: -1 }).limit(limit).lean());
 }
 
-function getFeedActivity(userId, limit = 50) {
-  const following = readFile(FOLLOWS_FILE)
-    .filter(f => f.follower_id === parseInt(userId))
-    .map(f => f.following_id);
-  if (following.length === 0) return [];
-  return readFile(ACTIVITY_FILE)
-    .filter(a => following.includes(a.user_id))
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-    .slice(0, limit);
+async function getFeedActivity(userId, limit = 50) {
+  const follows = await Follow.find({ follower_id: userId }).lean();
+  if (follows.length === 0) return [];
+  const followingIds = follows.map(f => f.following_id);
+  return toObj(await Activity.find({ user_id: { $in: followingIds } }).sort({ created_at: -1 }).limit(limit).lean());
 }
 
 // ── Follows ──────────────────────────────────────────────────────────────────
 
-function isFollowing(followerId, followingId) {
-  return readFile(FOLLOWS_FILE)
-    .some(f => f.follower_id === parseInt(followerId) && f.following_id === parseInt(followingId));
+async function isFollowing(followerId, followingId) {
+  const follow = await Follow.findOne({ follower_id: followerId, following_id: followingId });
+  return !!follow;
 }
 
-function followUser(followerId, followingId) {
-  if (parseInt(followerId) === parseInt(followingId)) return null;
-  const follows = readFile(FOLLOWS_FILE);
-  if (follows.some(f => f.follower_id === parseInt(followerId) && f.following_id === parseInt(followingId))) {
-    return { already: true };
+async function followUser(followerId, followingId) {
+  if (followerId.toString() === followingId.toString()) return null;
+  try {
+    await Follow.create({ follower_id: followerId, following_id: followingId });
+    return { ok: true };
+  } catch (err) {
+    if (err.code === 11000) return { already: true };
+    throw err;
   }
-  follows.push({ follower_id: parseInt(followerId), following_id: parseInt(followingId), created_at: new Date().toISOString() });
-  writeFile(FOLLOWS_FILE, follows);
-  return { ok: true };
 }
 
-function unfollowUser(followerId, followingId) {
-  const follows = readFile(FOLLOWS_FILE);
-  const before = follows.length;
-  const filtered = follows.filter(f => !(f.follower_id === parseInt(followerId) && f.following_id === parseInt(followingId)));
-  if (filtered.length === before) return false;
-  writeFile(FOLLOWS_FILE, filtered);
-  return true;
+async function unfollowUser(followerId, followingId) {
+  const result = await Follow.deleteOne({ follower_id: followerId, following_id: followingId });
+  return result.deletedCount > 0;
 }
 
-function getFollowers(userId) {
-  return readFile(FOLLOWS_FILE).filter(f => f.following_id === parseInt(userId)).map(f => f.follower_id);
+async function getFollowers(userId) {
+  const follows = await Follow.find({ following_id: userId }).lean();
+  return follows.map(f => f.follower_id.toString());
 }
 
-function getFollowing(userId) {
-  return readFile(FOLLOWS_FILE).filter(f => f.follower_id === parseInt(userId)).map(f => f.following_id);
+async function getFollowing(userId) {
+  const follows = await Follow.find({ follower_id: userId }).lean();
+  return follows.map(f => f.following_id.toString());
 }
 
 // ── Discover ─────────────────────────────────────────────────────────────────
 
-function getDiscoverUsers() {
-  const users = readFile(USERS_FILE);
-  const anime = readFile(ANIME_FILE);
-  return users.map(u => {
-    const count = anime.filter(a => a.user_id === u.id).length;
-    return { id: u.id, name: u.name, username: u.username || null, avatar: u.avatar || null, anime_count: count };
-  }).filter(u => u.anime_count > 0);
+async function getDiscoverUsers() {
+  const [users, counts] = await Promise.all([
+    User.find({}).lean(),
+    Anime.aggregate([{ $group: { _id: '$user_id', count: { $sum: 1 } } }]),
+  ]);
+  const countMap = new Map(counts.map(c => [c._id.toString(), c.count]));
+  return users
+    .map(u => ({
+      id: u._id.toString(),
+      name: u.name,
+      username: u.username || null,
+      avatar: u.avatar || null,
+      anime_count: countMap.get(u._id.toString()) || 0,
+    }))
+    .filter(u => u.anime_count > 0);
 }
 
 module.exports = {

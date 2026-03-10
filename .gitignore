@@ -8,3 +8,6 @@ frontend/node_modules/
 
 # Build
 frontend/dist/
+
+# Misc
+chat

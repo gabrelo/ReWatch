@@ -11,24 +11,34 @@ passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID,
   clientSecret: process.env.GOOGLE_CLIENT_SECRET,
   callbackURL: process.env.GOOGLE_CALLBACK_URL,
-}, (accessToken, refreshToken, profile, done) => {
-  const googleId = profile.id;
-  const email = profile.emails[0].value;
-  const name = profile.displayName;
-  const avatar = profile.photos[0]?.value || null;
+}, async (accessToken, refreshToken, profile, done) => {
+  try {
+    const googleId = profile.id;
+    const email = profile.emails[0].value;
+    const name = profile.displayName;
+    const avatar = profile.photos[0]?.value || null;
 
-  let user = db.findUserByGoogleId(googleId);
-  if (!user) {
-    user = db.createUser({ google_id: googleId, email, name, avatar });
-  } else {
-    user = db.updateUser(googleId, { name, avatar });
+    let user = await db.findUserByGoogleId(googleId);
+    if (!user) {
+      user = await db.createUser({ google_id: googleId, email, name, avatar });
+    } else {
+      user = await db.updateUser(googleId, { name, avatar });
+    }
+
+    return done(null, user);
+  } catch (err) {
+    return done(err);
   }
-
-  return done(null, user);
 }));
 
 passport.serializeUser((user, done) => done(null, user.id));
-passport.deserializeUser((id, done) => done(null, db.findUserById(id)));
+passport.deserializeUser(async (id, done) => {
+  try {
+    done(null, await db.findUserById(id));
+  } catch (err) {
+    done(err);
+  }
+});
 
 router.get('/google',
   passport.authenticate('google', { scope: ['profile', 'email'] })
@@ -49,46 +59,54 @@ router.get('/google/callback',
   }
 );
 
-router.get('/me', authMiddleware, (req, res) => {
-  const user = db.findUserById(req.user.id);
-  if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
-  const { google_id, ...safeUser } = user;
-  res.json(safeUser);
+router.get('/me', authMiddleware, async (req, res) => {
+  try {
+    const user = await db.findUserById(req.user.id);
+    if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
+    const { google_id, ...safeUser } = user;
+    res.json(safeUser);
+  } catch {
+    res.status(500).json({ error: 'Erro interno' });
+  }
 });
 
-router.put('/profile', authMiddleware, (req, res) => {
-  const { bio, cover_type, cover_value, pinned_mal_ids, username } = req.body;
+router.put('/profile', authMiddleware, async (req, res) => {
+  try {
+    const { bio, cover_type, cover_value, pinned_mal_ids, username } = req.body;
 
-  if (cover_type === 'custom' && cover_value && cover_value.length > 3_000_000) {
-    return res.status(400).json({ error: 'Imagem muito grande. Máximo ~2MB.' });
-  }
-
-  let validatedUsername = undefined;
-  if (username !== undefined) {
-    const lower = username.toLowerCase().trim();
-    if (!/^[a-z0-9_]{3,20}$/.test(lower)) {
-      return res.status(400).json({ error: 'Username inválido. Use 3–20 caracteres: letras, números ou _' });
+    if (cover_type === 'custom' && cover_value && cover_value.length > 3_000_000) {
+      return res.status(400).json({ error: 'Imagem muito grande. Máximo ~2MB.' });
     }
-    const existing = db.findUserByUsername(lower);
-    if (existing && existing.id !== req.user.id) {
-      return res.status(400).json({ error: 'Este username já está em uso.' });
+
+    let validatedUsername = undefined;
+    if (username !== undefined) {
+      const lower = username.toLowerCase().trim();
+      if (!/^[a-z0-9_]{3,20}$/.test(lower)) {
+        return res.status(400).json({ error: 'Username inválido. Use 3–20 caracteres: letras, números ou _' });
+      }
+      const existing = await db.findUserByUsername(lower);
+      if (existing && existing.id !== req.user.id) {
+        return res.status(400).json({ error: 'Este username já está em uso.' });
+      }
+      validatedUsername = lower;
     }
-    validatedUsername = lower;
+
+    const user = await db.updateProfile(req.user.id, {
+      bio: typeof bio === 'string' ? bio.slice(0, 300) : undefined,
+      cover_type,
+      cover_value,
+      pinned_mal_ids: Array.isArray(pinned_mal_ids)
+        ? pinned_mal_ids.slice(0, 5).map(Number).filter(id => Number.isInteger(id) && id > 0)
+        : undefined,
+      username: validatedUsername,
+    });
+
+    if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
+    const { google_id, ...safeUser } = user;
+    res.json(safeUser);
+  } catch {
+    res.status(500).json({ error: 'Erro interno' });
   }
-
-  const user = db.updateProfile(req.user.id, {
-    bio: typeof bio === 'string' ? bio.slice(0, 300) : undefined,
-    cover_type,
-    cover_value,
-    pinned_mal_ids: Array.isArray(pinned_mal_ids)
-      ? pinned_mal_ids.slice(0, 5).map(Number).filter(id => Number.isInteger(id) && id > 0)
-      : undefined,
-    username: validatedUsername,
-  });
-
-  if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
-  const { google_id, ...safeUser } = user;
-  res.json(safeUser);
 });
 
 module.exports = router;

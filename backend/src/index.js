@@ -487,9 +487,13 @@ app.get('/api/jikan/schedule', async (req, res) => {
 });
 
 // GET /api/discover
-app.get('/api/discover', (req, res) => {
-  const db = require('./database');
-  res.json(db.getDiscoverUsers());
+app.get('/api/discover', async (req, res) => {
+  try {
+    const db = require('./database');
+    res.json(await db.getDiscoverUsers());
+  } catch {
+    res.status(500).json({ error: 'Erro interno' });
+  }
 });
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
