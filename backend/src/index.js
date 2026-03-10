@@ -16,14 +16,20 @@ const followsRoutes = require('./routes/follows');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Strip any non-printable ASCII characters from the origin (Render sometimes adds invisible chars)
-const ALLOWED_ORIGIN = (process.env.FRONTEND_URL || 'http://localhost:5173')
-  .replace(/[^\x20-\x7E]/g, '').trim();
-console.log('CORS origin:', ALLOWED_ORIGIN);
+const ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'https://re-watch-lovat.vercel.app',
+];
 
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(cors({
-  origin: ALLOWED_ORIGIN,
+  origin: (origin, callback) => {
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+      callback(null, origin || ALLOWED_ORIGINS[0]);
+    } else {
+      callback(null, false);
+    }
+  },
   credentials: true,
 }));
 app.use(express.json({ limit: '3mb' }));
