@@ -1,0 +1,10 @@
+# Credenciais e segredos — NUNCA subir
+backend/.env
+backend/data/
+
+# Dependências
+backend/node_modules/
+frontend/node_modules/
+
+# Build
+frontend/dist/
