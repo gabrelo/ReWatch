@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3001;
 
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  origin: (process.env.FRONTEND_URL || 'http://localhost:5173').trim(),
   credentials: true,
 }));
 app.use(express.json({ limit: '3mb' }));
