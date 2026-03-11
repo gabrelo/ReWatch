@@ -42,6 +42,7 @@ const apiLimiter = rateLimit({
   max: 200,
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
   message: { error: 'Muitas requisições. Tente novamente em alguns minutos.' },
 });
 const authLimiter = rateLimit({
@@ -49,6 +50,7 @@ const authLimiter = rateLimit({
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
   message: { error: 'Muitas tentativas de autenticação. Aguarde 15 minutos.' },
 });
 const jikanLimiter = rateLimit({
@@ -56,6 +58,7 @@ const jikanLimiter = rateLimit({
   max: 40,
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
   message: { error: 'Limite de buscas atingido. Aguarde um momento.' },
 });
 app.use('/api/auth', authLimiter);
